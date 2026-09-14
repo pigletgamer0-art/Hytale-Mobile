@@ -1,0 +1,213 @@
+name: Build Hytale Mobile Battly-style APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hytale-mobile-battly-v08.yml'
+      - 'hytale-mobile-engine/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout overlay
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned compatibility engine
+        uses: actions/checkout@v4
+        with:
+          repository: brunodev85/winlator-app
+          ref: 3af528875c19d6e378e81ba28b09023840973a1f
+          path: engine
+          fetch-depth: 1
+          lfs: true
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build dependencies
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            'platforms;android-35' \
+            'build-tools;35.0.0' \
+            'platform-tools' \
+            'ndk;24.0.8215888' \
+            'cmake;3.22.1'
+
+      - name: Apply Battly-style launcher architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sed -i "s/applicationId 'com.winlator'/applicationId 'com.unofficial.hytalemobile'/" engine/app/build.gradle
+          sed -i 's/versionCode 32/versionCode 8/' engine/app/build.gradle
+          sed -i 's/versionName "11.2"/versionName "0.8.0-alpha"/' engine/app/build.gradle
+
+          while IFS= read -r -d '' file; do
+            sed -i \
+              -e 's#/data/data/com\.winlator#/data/data/com.unofficial.hytalemobile#g' \
+              -e 's#/data/user/0/com\.winlator#/data/user/0/com.unofficial.hytalemobile#g' \
+              "$file"
+          done < <(grep -RIlZ -E '/data/(data|user/0)/com\.winlator' engine/app/src || true)
+
+          sed -i 's/com\.winlator\.FileProvider/com.unofficial.hytalemobile.FileProvider/g' \
+            engine/app/src/main/AndroidManifest.xml \
+            engine/app/src/main/java/com/winlator/core/FileUtils.java
+
+          sed -i '/android.permission.WRITE_EXTERNAL_STORAGE/d' engine/app/src/main/AndroidManifest.xml
+          sed -i '/android.permission.READ_EXTERNAL_STORAGE/d' engine/app/src/main/AndroidManifest.xml
+
+          cp hytale-mobile-engine/HytaleMobileActivity.java \
+            engine/app/src/main/java/com/winlator/HytaleMobileActivity.java
+          cp hytale-mobile-engine/controls-77.icp \
+            engine/app/src/main/assets/inputcontrols/profiles/controls-77.icp
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('engine/app/src/main/java/com/winlator/HytaleMobileActivity.java')
+          s = p.read_text()
+          s = s.replace('import android.widget.TextView;\n',
+                        'import android.widget.TextView;\n\nimport androidx.appcompat.app.AppCompatActivity;\n', 1)
+          s = s.replace('public final class HytaleMobileActivity extends MainActivity {',
+                        'public final class HytaleMobileActivity extends AppCompatActivity {', 1)
+          s = s.replace('        super.onCreate(savedInstanceState);\n        showHytaleLauncher();',
+                        '        super.onCreate(savedInstanceState);\n        showHytaleLauncher();\n        RootFSInstaller.installIfNeeded(this);', 1)
+          s = s.replace('Engine Alpha 0.6 · Wine + Box64',
+                        'Engine Alpha 0.8 · Battly-style launcher')
+          old = '        intent.putExtra("exec_path", client.getAbsolutePath());\n        startActivity(intent);'
+          new = '        intent.putExtra("exec_path", client.getAbsolutePath());\n        intent.putExtra("controls_profile_id", 77);\n        startActivity(intent);'
+          if old not in s:
+              raise SystemExit('launch insertion point not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('engine/app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java')
+          s = p.read_text()
+          s = s.replace('import com.winlator.MainActivity;\n', '')
+          s = s.replace('public static void install(final MainActivity activity)',
+                        'public static void install(final AppCompatActivity activity)')
+          s = s.replace('public static void installIfNeeded(final MainActivity activity)',
+                        'public static void installIfNeeded(final AppCompatActivity activity)')
+          p.write_text(s)
+
+          p = Path('engine/app/src/main/java/com/winlator/MainActivity.java')
+          s = p.read_text()
+          needle = '    private boolean requestAppPermissions() {\n'
+          if needle not in s:
+              raise SystemExit('permission method not found')
+          s = s.replace(needle,
+              needle + '        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) return false;\n', 1)
+          p.write_text(s)
+
+          p = Path('engine/app/src/main/AndroidManifest.xml')
+          s = p.read_text()
+          needle = '        <activity android:name="com.winlator.MainActivity"\n'
+          if needle not in s:
+              raise SystemExit('launcher activity not found')
+          s = s.replace(needle, '        <activity android:name="com.winlator.HytaleMobileActivity"\n', 1)
+          marker = '        <activity android:name="com.winlator.XServerDisplayActivity"\n'
+          advanced = '''        <activity android:name="com.winlator.MainActivity"\n            android:theme="@style/AppThemeDark"\n            android:exported="false"\n            android:screenOrientation="sensor"\n            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation" />\n\n'''
+          if marker not in s:
+              raise SystemExit('XServer marker not found')
+          s = s.replace(marker, advanced + marker, 1)
+          p.write_text(s)
+
+          p = Path('engine/app/src/main/java/com/winlator/XServerDisplayActivity.java')
+          s = p.read_text()
+          old = '''        if (shortcut != null) {\n            String controlsProfile = shortcut.getExtra("controlsProfile");\n            if (!controlsProfile.isEmpty()) {\n                ControlsProfile profile = inputControlsManager.getProfile(Integer.parseInt(controlsProfile));\n                if (profile != null) showInputControls(profile);\n            }\n        }\n'''
+          new = '''        if (shortcut != null) {\n            String controlsProfile = shortcut.getExtra("controlsProfile");\n            if (!controlsProfile.isEmpty()) {\n                ControlsProfile profile = inputControlsManager.getProfile(Integer.parseInt(controlsProfile));\n                if (profile != null) showInputControls(profile);\n            }\n        }\n        else {\n            int controlsProfileId = getIntent().getIntExtra("controls_profile_id", 0);\n            if (controlsProfileId > 0) {\n                ControlsProfile profile = inputControlsManager.getProfile(controlsProfileId);\n                if (profile != null) showInputControls(profile);\n            }\n        }\n'''
+          if old not in s:
+              raise SystemExit('controls insertion point not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+          while IFS= read -r -d '' file; do
+            sed -i -E 's#<string name="app_name">[^<]*</string>#<string name="app_name">Hytale Mobile (Unofficial)</string>#' "$file"
+          done < <(find engine/app/src/main/res -name strings.xml -print0)
+
+          mkdir -p engine/app/src/main/assets/licenses
+          cp engine/LICENSE engine/app/src/main/assets/licenses/WINLATOR-LGPL-2.1.txt
+          cat > engine/app/src/main/assets/licenses/HYTALE-MOBILE-NOTICE.txt <<'EOF'
+          Hytale Mobile (Unofficial) - alpha 0.8
+
+          This build uses a launcher architecture inspired by Android Java
+          launchers such as Battly/Pojav: a normal Android launcher, scoped
+          storage/document picker imports, a separate runtime layer and mobile
+          controls. No Battly source code or branding is copied into this app.
+
+          Hytale's supplied client is a Windows x86-64 native executable, not a
+          Java client JAR. Therefore the runtime backend still needs a Windows
+          compatibility layer (Wine + Box64) until a native Android/Linux Hytale
+          client is available. Hytale game files are not bundled.
+
+          Runtime foundation: Winlator by BrunoSX / brunodev85, pinned at
+          3af528875c19d6e378e81ba28b09023840973a1f, under GNU LGPL-2.1.
+          EOF
+
+          echo '=== v0.8 verification ==='
+          grep -n 'applicationId\|versionCode\|versionName' engine/app/build.gradle
+          grep -n 'extends AppCompatActivity\|RootFSInstaller.installIfNeeded' engine/app/src/main/java/com/winlator/HytaleMobileActivity.java
+          grep -n 'install(final AppCompatActivity\|installIfNeeded(final AppCompatActivity' engine/app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java
+          ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE\|android.permission.READ_EXTERNAL_STORAGE' engine/app/src/main/AndroidManifest.xml
+          test -s engine/app/src/main/assets/inputcontrols/profiles/controls-77.icp
+
+      - name: Build APK
+        working-directory: engine
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Verify APK payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find engine/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
+          unzip -l "$APK" > apk-files.txt
+          grep -q 'assets/rootfs.tzst' apk-files.txt
+          grep -q 'assets/box64/box64-' apk-files.txt
+          grep -q 'lib/arm64-v8a/libwinlator.so' apk-files.txt
+          grep -q 'assets/dxwrapper/dxvk-' apk-files.txt
+          grep -q 'assets/inputcontrols/profiles/controls-77.icp' apk-files.txt
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find engine/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
+          cp "$APK" Hytale-Mobile-v0.8-battly-style-alpha.apk
+          sha256sum Hytale-Mobile-v0.8-battly-style-alpha.apk > Hytale-Mobile-v0.8-battly-style-alpha.sha256.txt
+          printf '%s\n' \
+            'Hytale Mobile v0.8 Battly-style Alpha' \
+            'Standalone Android launcher: no Winlator MainActivity initialization on app boot.' \
+            'Uses scoped/document-picker imports instead of obsolete broad storage permissions.' \
+            'Runtime is prepared behind the launcher and Hytale launches through the compatibility engine.' \
+            'No Hytale files included. Real-device game launch still requires testing.' \
+            > Hytale-Mobile-v0.8-battly-style-alpha-NOTICE.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hytale-Mobile-v0.8-battly-style-alpha
+          path: |
+            Hytale-Mobile-v0.8-battly-style-alpha.apk
+            Hytale-Mobile-v0.8-battly-style-alpha.sha256.txt
+            Hytale-Mobile-v0.8-battly-style-alpha-NOTICE.txt
+          if-no-files-found: error
+          compression-level: 0
