@@ -1,0 +1,98 @@
+name: Build TriConsole Virtual Controller v0.2 APK
+
+on:
+  push:
+    branches: [build-tricontroller-v0.2]
+    paths:
+      - '.github/workflows/build-tricontroller-v02.yml'
+      - 'tricontroller-v0.2-overlay/**'
+      - 'build-input/tricontroller-v0.1-source.part*.b64'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0' 'platform-tools'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Decode v0.1 base source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-out
+          cat build-input/tricontroller-v0.1-source.part*.b64 > build-out/source.b64
+          base64 -d build-out/source.b64 > build-out/source.zip
+          unzip -q build-out/source.zip -d build-out/project
+          test -f build-out/project/TriConsole-Virtual-Controller-v0.1-alpha/settings.gradle
+
+      - name: Apply v0.2 overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT=build-out/project/TriConsole-Virtual-Controller-v0.1-alpha
+          cp tricontroller-v0.2-overlay/app/build.gradle "$PROJECT/app/build.gradle"
+          cp tricontroller-v0.2-overlay/app/src/main/java/com/alonstark/tricontroller/MainActivity.java "$PROJECT/app/src/main/java/com/alonstark/tricontroller/MainActivity.java"
+          cp tricontroller-v0.2-overlay/app/src/main/java/com/alonstark/tricontroller/ControllerProfile.java "$PROJECT/app/src/main/java/com/alonstark/tricontroller/ControllerProfile.java"
+          cp tricontroller-v0.2-overlay/app/src/main/java/com/alonstark/tricontroller/ControllerSurface.java "$PROJECT/app/src/main/java/com/alonstark/tricontroller/ControllerSurface.java"
+          cp tricontroller-v0.2-overlay/app/src/main/java/com/alonstark/tricontroller/BluetoothHidManager.java "$PROJECT/app/src/main/java/com/alonstark/tricontroller/BluetoothHidManager.java"
+          grep -n "versionName\|α0.2\|sendPrintScreen\|SpecialAction" \
+            "$PROJECT/app/build.gradle" \
+            "$PROJECT/app/src/main/java/com/alonstark/tricontroller/MainActivity.java" \
+            "$PROJECT/app/src/main/java/com/alonstark/tricontroller/ControllerSurface.java" \
+            "$PROJECT/app/src/main/java/com/alonstark/tricontroller/BluetoothHidManager.java"
+
+      - name: Build debug APK
+        working-directory: build-out/project/TriConsole-Virtual-Controller-v0.1-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find build-out/project/TriConsole-Virtual-Controller-v0.1-alpha/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
+          test -n "$APK"
+          cp "$APK" TriConsole-Virtual-Controller-v0.2-alpha.apk
+          sha256sum TriConsole-Virtual-Controller-v0.2-alpha.apk > TriConsole-Virtual-Controller-v0.2-alpha.sha256.txt
+          file TriConsole-Virtual-Controller-v0.2-alpha.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TriConsole-Virtual-Controller-v0.2-alpha
+          path: |
+            TriConsole-Virtual-Controller-v0.2-alpha.apk
+            TriConsole-Virtual-Controller-v0.2-alpha.sha256.txt
+          if-no-files-found: error
+          compression-level: 0
